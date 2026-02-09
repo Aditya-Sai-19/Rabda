@@ -52,10 +52,20 @@ FILE_INPUT = [
 ]
 
 # Preview/caption area (often contenteditable)
+# Preview/caption area (often contenteditable)
 CAPTION_BOX = [
-    "div[contenteditable='true'][role='textbox']",
+    # Text-based (most robust if placeholder is visible)
+    "div:has-text('Add a caption')",
+    "div:has-text('Type a caption')",
+    # Aria/Attribute based
+    "div[aria-label='Add a caption']",
+    "div[aria-label='Type a caption']",
+    "div[title='Type a caption']",
     "div[contenteditable='true'][data-tab]",
+    "div[contenteditable='true'][role='textbox']",
     "footer div[contenteditable='true']",
+    # Specific fallback
+    "#app > div > div > div > div > div > div > div > div > div > div > div > div[contenteditable='true']", 
 ]
 
 # Send/Post button
@@ -79,7 +89,7 @@ SEND_BUTTON_SELECTORS = [
 
 # A rough indicator that the preview composer is open
 PREVIEW_READY = [
-    "input[type='file']",
     "button[aria-label*='Send' i]",
     "button[aria-label*='Post' i]",
+    "span[data-icon='send']",
 ]

@@ -41,41 +41,25 @@ def retry(fn: Callable[[], T], *, tries: int, on_retry: Optional[Callable[[int, 
 
 
 def first_visible_locator(page: Page, selectors: Iterable[str], *, timeout_ms: int) -> Locator:
-    """Return the first selector whose locator becomes visible."""
+    """Return a locator for the first visible element matching any of the selectors."""
 
-    last_error: Optional[Exception] = None
-    for sel in selectors:
-        try:
-            loc = page.locator(sel).first
-            loc.wait_for(state="visible", timeout=timeout_ms)
-            return loc
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            continue
-    if last_error:
-        raise last_error
-    raise RuntimeError("No selectors provided")
+    # Join selectors with commas to create an OR selector.
+    # This allows Playwright to find whichever one appears first efficiently.
+    joined_selector = ", ".join(selectors)
+    
+    loc = page.locator(joined_selector).first
+    loc.wait_for(state="visible", timeout=timeout_ms)
+    return loc
 
 
 def first_attached_locator(page: Page, selectors: Iterable[str], *, timeout_ms: int) -> Locator:
-    """Return the first locator whose element is attached to the DOM (not necessarily visible).
+    """Return a locator for the first element attached to the DOM matching any of the selectors."""
 
-    This is useful for DOM-based upload flows where the file input may be hidden
-    but still present in the DOM.
-    """
-
-    last_error: Optional[Exception] = None
-    for sel in selectors:
-        try:
-            loc = page.locator(sel).first
-            loc.wait_for(state="attached", timeout=timeout_ms)
-            return loc
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            continue
-    if last_error:
-        raise last_error
-    raise RuntimeError("No selectors provided")
+    joined_selector = ", ".join(selectors)
+    
+    loc = page.locator(joined_selector).first
+    loc.wait_for(state="attached", timeout=timeout_ms)
+    return loc
 
 
 def safe_click(page: Page, selectors: Iterable[str], *, timeout_ms: int, tries: int, log: Callable[[str], None]) -> None:

@@ -31,6 +31,7 @@ from .utils import (
     safe_set_input_files,
     first_attached_locator,
 )
+from .csv_handler import CsvHandler, HEADER_STATUS
 
 LogCallback = Callable[[str], None]
 
@@ -140,7 +141,7 @@ class WhatsAppStatusUploader:
 
         # New WhatsApp UI flow:
         #   1) Click "My status"
-        #   2) In chooser popup, click "Photos & videos" to open media composer
+        #   2) This opens a dropdown having "Photos & videos"
         self.logger.info("[STEP] Clicking My status")
         safe_click(
             self.page,
@@ -151,63 +152,47 @@ class WhatsAppStatusUploader:
         )
         human_delay(0.8)
 
-        composer_verify_selectors = [
-            "input[type='file']",
-            "div[contenteditable='true'][role='textbox']",
-        ]
-
-        def _composer_opened() -> bool:
-            for sel in composer_verify_selectors:
-                try:
-                    self.page.locator(sel).first.wait_for(state="attached", timeout=5000)
-                    return True
-                except Exception:
-                    continue
-            return False
-
-        self.logger.info("[STEP] Clicking Photos & videos option")
-        last_exc: Exception | None = None
-        for media_sel in MEDIA_STATUS_SELECTORS:
-            try:
-                safe_click(
-                    self.page,
-                    [media_sel],
-                    timeout_ms=CONFIG.action_timeout_ms,
-                    tries=1,
-                    log=self.logger.info,
-                )
-                human_delay(0.9)
-
-                # Verify composer opened (do not require visibility).
-                if _composer_opened():
-                    self.logger.info("[VERIFY] Media composer opened")
-                    return
-
-                self.logger.info(f"[RETRY] Trying fallback selector {media_sel}")
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                self.logger.info(f"[RETRY] Trying fallback selector {media_sel} failed: {type(exc).__name__}: {exc}")
-                continue
-
-        raise RuntimeError("Status media composer did not open") from last_exc
-
     def upload_image(self, image_path: str) -> None:
-        """Upload image using file input (DOM path only)."""
+        """Upload image. Click 'Photos & videos' if present, handling file chooser."""
 
         self.logger.info("[STEP] Uploading image")
-
-        # Use attached-based locator logic to avoid triggering OS file picker dialogs.
+        
+        # 1. Try to find/click 'Photos & videos' with file chooser handling
+        media_btn_clicked = False
         try:
-            self.logger.info("[STEP] Located attached file input for DOM upload (no OS dialog).")
-        except Exception as exc:  # pragma: no cover
-            self.logger.error(f"Failed to locate file input: {exc}")
-            raise
+            # Check if any media selector is visible
+            for media_sel in MEDIA_STATUS_SELECTORS:
+                # We use a short timeout check to see if the menu is open
+                loc = self.page.locator(media_sel).first
+                if loc.is_visible(timeout=2000):
+                    self.logger.info(f"[STEP] Found media button '{media_sel}'. Clicking with file chooser.")
+                    
+                    with self.page.expect_file_chooser(timeout=CONFIG.action_timeout_ms) as fc_info:
+                        loc.click()
+                    
+                    file_chooser = fc_info.value
+                    file_chooser.set_files(image_path)
+                    media_btn_clicked = True
+                    self.logger.info("File chooser handled successfully.")
+                    break
+        except Exception as exc:
+            self.logger.info(f"Media button click/chooser failed or not found: {exc}")
 
-        # DOM-based upload: set the file directly on the attached input.
-        safe_set_input_files(self.page, FILE_INPUT, image_path, timeout_ms=CONFIG.action_timeout_ms)
+        # 2. If we didn't click the media button (maybe Old UI or different state),
+        # try strictly DOM-based upload on the input element.
+        if not media_btn_clicked:
+            self.logger.info("Media button not clicked; attempting direct DOM upload.")
+            try:
+                # Use attached-based locator logic
+                safe_set_input_files(self.page, FILE_INPUT, image_path, timeout_ms=CONFIG.action_timeout_ms)
+            except Exception as exc:
+                self.logger.error(f"Direct DOM upload failed: {exc}")
+                raise
+
         # Wait for preview/compose screen signals.
         first_visible_locator(self.page, PREVIEW_READY, timeout_ms=CONFIG.navigation_timeout_ms)
         self.logger.info("Image preview ready.")
+
 
     def add_caption(self, caption: str) -> None:
         """Add optional caption."""
@@ -216,10 +201,25 @@ class WhatsAppStatusUploader:
             self.logger.info("No caption provided; skipping caption step.")
             return
 
+
         self.logger.info("Adding caption...")
-        loc = first_visible_locator(self.page, CAPTION_BOX, timeout_ms=CONFIG.action_timeout_ms)
-        safe_fill(loc, caption, timeout_ms=CONFIG.action_timeout_ms)
-        human_delay(0.8)
+        
+        try:
+            # We look for something containing "Add a caption" or similar text.
+            loc = first_visible_locator(self.page, CAPTION_BOX, timeout_ms=CONFIG.action_timeout_ms)
+            
+            # Click to focus
+            loc.click()
+            human_delay(0.5)
+            
+            # Using keyboard input instead of .fill() is often safer for complex contenteditables
+            # as it mimics real typing and triggers JS events properly.
+            self.page.keyboard.type(caption, delay=50)
+            human_delay(1.5)  # Wait for typing to complete/register
+            self.logger.info("Caption typed.")
+            
+        except Exception as exc:
+            self.logger.warn(f"Failed to add caption: {exc}. Proceeding without caption.")
 
     def send_status(self) -> None:
         """Click Send/Post button (DOM-based, with updated selectors)."""
@@ -344,5 +344,99 @@ class WhatsAppStatusUploader:
         except Exception as exc:  # noqa: BLE001 - desired for UI automation
             self.logger.error(f"Automation failed: {type(exc).__name__}: {exc}")
             return PostResult(False, f"Automation failed: {type(exc).__name__}: {exc}")
+        finally:
+            self.close()
+
+    def batch_upload(
+        self,
+        csv_path: str,
+        images_dir: str,
+        resume_mode: bool = False,
+        progress_callback: Optional[Callable[[str], None]] = None,
+    ) -> PostResult:
+        """Process the CSV queue in batch mode."""
+
+        if progress_callback:
+            self.logger.callback = progress_callback
+
+        handler = CsvHandler(csv_path)
+        valid_msg = handler.validate()
+        if valid_msg:
+            return PostResult(False, f"CSV Validation Error: {valid_msg}")
+
+        # 1. Reset if START (not resume), else filter for RESUME
+        if not resume_mode:
+            self.logger.info("Resetting all statuses to 'No' (START mode).")
+            handler.reset_all_statuses()
+            items = handler.read_queue()  # Read all
+        else:
+            self.logger.info("Resuming pending uploads (RESUME mode).")
+            items = handler.read_queue(filter_status="No")
+
+        if not items:
+            return PostResult(True, "No pending items to upload.")
+
+        total = len(items)
+        success_count = 0
+        skip_count = 0
+
+        self.logger.info(f"Starting batch upload for {total} items...")
+
+        try:
+            # Step 1: Launch browser ONCE for the whole batch
+            self.launch_browser()
+            self.wait_for_login()
+
+            for i, item in enumerate(items, start=1):
+                self.logger.info(f"Processing {i}/{total}: {item.image_name}")
+                
+                # Build image path
+                full_path = Path(images_dir) / item.image_name
+
+                # Check existence
+                if not full_path.exists():
+                    self.logger.warn(f"Image not found: {full_path} - Skipping.")
+                    handler.update_status(item.row_index, "No (Missing Image)")
+                    skip_count += 1
+                    continue
+
+                # Upload
+                try:
+                    self.open_status_tab()
+                    self.click_add_status()
+                    self.upload_image(str(full_path))
+                    self.add_caption(item.caption)
+                    self.send_status()
+                    self.verify_posted()
+                    
+                    # Update status on success
+                    handler.update_status(item.row_index, "Yes")
+                    success_count += 1
+                    self.logger.info(f"Successfully uploaded: {item.image_name}")
+
+                except Exception as exc:
+                    self.logger.error(f"Failed to upload {item.image_name}: {exc}")
+                    # Keep as No, or maybe mark as "Error"? 
+                    # User said: "Upload failure: Keep status as "No" for retry"
+                    # But verifying if it was a critical error vs transient is hard.
+                    # We will continue to next item unless it is a browser crash.
+                    
+                    # If browser crashed, we might need to relaunch?
+                    # For now, we propagate critical errors but log item errors.
+                    if not self._page or self._page.is_closed():
+                        raise exc
+                    
+                    # If just this item failed, update UI but keep status No
+                    continue
+                
+                human_delay(2.0)
+
+            summary = f"Batch Complete. Uploaded: {success_count} | Skipped: {skip_count} | Total: {total}"
+            self.logger.info(summary)
+            return PostResult(True, summary)
+
+        except Exception as exc:
+            self.logger.error(f"Batch processing stopped: {exc}")
+            return PostResult(False, f"Batch failed: {exc}")
         finally:
             self.close()

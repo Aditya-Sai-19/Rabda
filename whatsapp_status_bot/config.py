@@ -38,5 +38,9 @@ class Config:
     # Debug logging
     debug: bool = True
 
+    # Default paths
+    default_csv_path: Path = Path("data/status_queue.csv")
+    default_images_folder: Path = Path("images/")
+
 
 CONFIG = Config()
