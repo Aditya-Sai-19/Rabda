@@ -31,16 +31,25 @@ LOGIN_READY = [
 
 # Updates/Status tab entry point
 STATUS_TAB_SELECTORS = [
-    # Primary selectors for Updates/Status tab
+    # Icon-based selectors (WhatsApp uses various icon names)
     '[data-icon="status-outline"]',
     '[data-icon="status-v3-outline"]',
-    'button[aria-label*="Updates" i]',
-    'div[aria-label*="Updates" i]',
+    '[data-icon="status"]',
+    '[data-icon="updates-outline"]',
+    '[data-icon="newsletter-outline"]',  # Sometimes used for Updates
+    # The Status/Updates tab button in left sidebar
     'button[aria-label*="Status" i]',
+    'button[aria-label*="Updates" i]',
     'div[aria-label*="Status" i]',
+    'div[aria-label*="Updates" i]',
+    '[aria-label*="Status" i]',
+    '[aria-label*="Updates" i]',
+    # Role-based
     'div[role="button"][aria-label*="status" i]',
     'div[role="button"][aria-label*="updates" i]',
-    # Text-based fallbacks
+    # Text-based fallbacks (Playwright text selector)
+    'text=Status',
+    'text=Updates',
     'span:has-text("Updates")',
     'span:has-text("Status")',
 ]
@@ -48,18 +57,7 @@ STATUS_TAB_SELECTORS = [
 # Backwards-compatible alias
 STATUS_TAB = STATUS_TAB_SELECTORS
 
-# The + icon at top-right of Status page (used to add new status when one exists)
-ADD_STATUS_PLUS_ICON = [
-    "[data-icon='plus']",
-    "[data-icon='plus-unread']",
-    "[data-testid='status-v3-add']",
-    "button[aria-label*='New status' i]",
-    "div[aria-label*='New status' i]",
-    "[aria-label*='New status' i]",
-    "span[data-icon='plus']",
-]
-
-# Add / My Status button (used when no status exists yet)
+# Add / My Status button
 ADD_STATUS_SELECTORS = [
     # Text-based selectors
     "text=My status",
@@ -70,8 +68,9 @@ ADD_STATUS_SELECTORS = [
     "div[aria-label*='My status' i]",
     "div[aria-label*='Add status' i]",
     "[aria-label*='My status' i]",
-    # Icon-based
+    # Icon-based (camera/plus icons for adding status)
     "[data-icon='status-v3-unread']",
+    "[data-icon='plus']",
     # Role-based with text
     "div[role='button']:has-text('My status')",
     "div[role='button']:has-text('Add')",

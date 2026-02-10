@@ -12,7 +12,6 @@ from .config import CONFIG
 from .logger import Logger
 from .selectors import (
     ADD_STATUS_BUTTON,
-    ADD_STATUS_PLUS_ICON,
     ADD_STATUS_SELECTORS,
     CAPTION_BOX,
     FILE_INPUT,
@@ -118,46 +117,35 @@ class WhatsAppStatusUploader:
         verify_selectors = [
             "text=My status",
             "text=Add status",
-            "text=Add Status",
-            "input[type='file']",
+            "[data-icon='plus']",
             "[data-icon='status-v3-unread']",
             "div[aria-label*='My status' i]",
-            "div[aria-label*='Add status' i]",
         ]
 
         def _verify_opened() -> bool:
-            """Verify the status composer is opened by ensuring at least one
-            known element is attached to the DOM (not strictly visible).
-            """
+            """Verify the status tab is opened."""
             for vsel in verify_selectors:
                 try:
-                    self.page.locator(vsel).first.wait_for(state="attached", timeout=5000)
-                    self.logger.info("[VERIFY] Status tab detected (attached)" )
-                    return True
+                    loc = self.page.locator(vsel).first
+                    if loc.is_visible(timeout=3000):
+                        self.logger.info(f"[VERIFY] Status tab detected: {vsel}")
+                        return True
                 except Exception:
                     continue
             return False
 
-        # Try each selector candidate and verify we truly opened Updates/Status.
+        # Try each selector with short timeout (3 seconds each)
         for sel in STATUS_TAB_SELECTORS:
-            self.logger.info(f"[STEP] Clicking Updates tab selector: {sel}")
             try:
-                safe_click(
-                    self.page,
-                    [sel],
-                    timeout_ms=CONFIG.action_timeout_ms,
-                    tries=1,
-                    log=self.logger.info,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.logger.info(f"[RETRY] Trying fallback selector {sel} failed: {type(exc).__name__}: {exc}")
+                loc = self.page.locator(sel).first
+                if loc.is_visible(timeout=3000):
+                    self.logger.info(f"[STEP] Found Status tab: {sel}")
+                    loc.click()
+                    human_delay(1.0)
+                    if _verify_opened():
+                        return
+            except Exception:
                 continue
-
-            human_delay(1.0)
-            if _verify_opened():
-                return
-
-            self.logger.info("Status tab not opened — retrying alternate selector")
 
         self.logger.error("[ERROR] Status tab open failed")
         raise RuntimeError("Failed to open Updates/Status tab — selectors outdated")
@@ -165,34 +153,47 @@ class WhatsAppStatusUploader:
     def click_add_status(self) -> None:
         """Click Add Status / My Status entry point.
         
-        When a status already exists, clicking 'My status' opens the viewer.
-        Instead, we must click the + icon at the top-right of the Status page.
-        We try the + icon first, then fall back to 'My status' / 'Add status'.
+        If a status already exists (ring around My status), we click the + icon
+        at the top right instead of clicking on My status (which opens viewer).
         """
 
-        # Step 1: Try the + icon first (works when a status already exists)
-        self.logger.info("[STEP] Looking for + icon to add new status...")
-        for sel in ADD_STATUS_PLUS_ICON:
+        # First, try to click the + icon (works when status already exists)
+        plus_icon_selectors = [
+            "[data-icon='plus']",
+            "[data-icon='add']",
+            "button[aria-label*='Add' i]",
+            "div[aria-label*='New status' i]",
+            "span[data-icon='plus']",
+            # The circled + icon in the header
+            "header button:has([data-icon='plus'])",
+            "div[role='button']:has([data-icon='plus'])",
+        ]
+        
+        plus_clicked = False
+        for sel in plus_icon_selectors:
             try:
                 loc = self.page.locator(sel).first
                 if loc.is_visible(timeout=2000):
-                    self.logger.info(f"[OK] Found + icon: {sel}")
+                    self.logger.info(f"[STEP] Found + icon: {sel}")
                     loc.click()
+                    plus_clicked = True
+                    self.logger.info("[OK] Clicked + icon to add new status")
                     human_delay(0.8)
-                    return
+                    break
             except Exception:
                 continue
-
-        # Step 2: Fall back to 'My status' / 'Add status' (when no status exists yet)
-        self.logger.info("[STEP] + icon not found; clicking My status / Add status...")
-        safe_click(
-            self.page,
-            ADD_STATUS_SELECTORS,
-            timeout_ms=CONFIG.action_timeout_ms,
-            tries=CONFIG.max_action_retries,
-            log=self.logger.info,
-        )
-        human_delay(0.8)
+        
+        # If + icon not found/clicked, fall back to clicking "My status"
+        if not plus_clicked:
+            self.logger.info("[STEP] Clicking My status (no + icon found)")
+            safe_click(
+                self.page,
+                ADD_STATUS_SELECTORS,
+                timeout_ms=CONFIG.action_timeout_ms,
+                tries=CONFIG.max_action_retries,
+                log=self.logger.info,
+            )
+            human_delay(0.8)
 
     def upload_image(self, image_path: str) -> None:
         """Upload image. Click 'Photos & videos' if present, handling file chooser."""
