@@ -38,9 +38,9 @@ class Config:
     # Debug logging
     debug: bool = True
 
-    # Default paths
-    default_csv_path: Path = Path("data/status_queue.csv")
-    default_images_folder: Path = Path("images/")
+    # Default paths (relative to the module directory for portability)
+    default_csv_path: Path = Path(__file__).resolve().parent / "data" / "status_queue.csv"
+    default_images_folder: Path = Path(__file__).resolve().parent / "images"
 
 
 CONFIG = Config()
