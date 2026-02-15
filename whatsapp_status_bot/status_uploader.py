@@ -85,8 +85,29 @@ class WhatsAppStatusUploader:
         """Wait until WhatsApp Web is ready (user logged in)."""
 
         self.logger.info("Waiting for WhatsApp Web login to be ready...")
-        first_visible_locator(self.page, LOGIN_READY, timeout_ms=CONFIG.navigation_timeout_ms)
-        self.logger.info("Login ready (chat UI detected).")
+        
+        # Try to find any login-ready indicator (attached to DOM is sufficient)
+        # Some elements may not be visible but indicate login is complete
+        try:
+            first_attached_locator(self.page, LOGIN_READY, timeout_ms=CONFIG.navigation_timeout_ms)
+            self.logger.info("Login ready (chat UI detected).")
+            return
+        except Exception as exc:
+            self.logger.info(f"Primary login detection failed: {exc}")
+        
+        # Fallback: wait for any element that indicates the main app is loaded
+        fallback_selectors = [
+            "div[id='app']",
+            "div[id='main']",
+            "#side",
+            "div[data-testid='chat-list']",
+        ]
+        try:
+            first_attached_locator(self.page, fallback_selectors, timeout_ms=CONFIG.navigation_timeout_ms)
+            self.logger.info("Login ready (fallback detection).")
+        except Exception as exc:
+            self.logger.error(f"Login detection failed: {exc}")
+            raise RuntimeError("Failed to detect WhatsApp Web login - please ensure you are logged in")
 
     def open_status_tab(self) -> None:
         """Navigate to Updates/Status tab."""
@@ -96,61 +117,83 @@ class WhatsAppStatusUploader:
         verify_selectors = [
             "text=My status",
             "text=Add status",
-            "input[type='file']",
+            "[data-icon='plus']",
+            "[data-icon='status-v3-unread']",
+            "div[aria-label*='My status' i]",
         ]
 
         def _verify_opened() -> bool:
-            """Verify the status composer is opened by ensuring at least one
-            known element is attached to the DOM (not strictly visible).
-            """
+            """Verify the status tab is opened."""
             for vsel in verify_selectors:
                 try:
-                    self.page.locator(vsel).first.wait_for(state="attached", timeout=5000)
-                    self.logger.info("[VERIFY] Status tab detected (attached)" )
-                    return True
+                    loc = self.page.locator(vsel).first
+                    if loc.is_visible(timeout=3000):
+                        self.logger.info(f"[VERIFY] Status tab detected: {vsel}")
+                        return True
                 except Exception:
                     continue
             return False
 
-        # Try each selector candidate and verify we truly opened Updates/Status.
+        # Try each selector with short timeout (3 seconds each)
         for sel in STATUS_TAB_SELECTORS:
-            self.logger.info(f"[STEP] Clicking Updates tab selector: {sel}")
             try:
-                safe_click(
-                    self.page,
-                    [sel],
-                    timeout_ms=CONFIG.action_timeout_ms,
-                    tries=1,
-                    log=self.logger.info,
-                )
-            except Exception as exc:  # noqa: BLE001
-                self.logger.info(f"[RETRY] Trying fallback selector {sel} failed: {type(exc).__name__}: {exc}")
+                loc = self.page.locator(sel).first
+                if loc.is_visible(timeout=3000):
+                    self.logger.info(f"[STEP] Found Status tab: {sel}")
+                    loc.click()
+                    human_delay(1.0)
+                    if _verify_opened():
+                        return
+            except Exception:
                 continue
-
-            human_delay(1.0)
-            if _verify_opened():
-                return
-
-            self.logger.info("Status tab not opened — retrying alternate selector")
 
         self.logger.error("[ERROR] Status tab open failed")
         raise RuntimeError("Failed to open Updates/Status tab — selectors outdated")
 
     def click_add_status(self) -> None:
-        """Click Add Status / My Status entry point."""
+        """Click Add Status / My Status entry point.
+        
+        If a status already exists (ring around My status), we click the + icon
+        at the top right instead of clicking on My status (which opens viewer).
+        """
 
-        # New WhatsApp UI flow:
-        #   1) Click "My status"
-        #   2) This opens a dropdown having "Photos & videos"
-        self.logger.info("[STEP] Clicking My status")
-        safe_click(
-            self.page,
-            ADD_STATUS_SELECTORS,
-            timeout_ms=CONFIG.action_timeout_ms,
-            tries=CONFIG.max_action_retries,
-            log=self.logger.info,
-        )
-        human_delay(0.8)
+        # First, try to click the + icon (works when status already exists)
+        plus_icon_selectors = [
+            "[data-icon='plus']",
+            "[data-icon='add']",
+            "button[aria-label*='Add' i]",
+            "div[aria-label*='New status' i]",
+            "span[data-icon='plus']",
+            # The circled + icon in the header
+            "header button:has([data-icon='plus'])",
+            "div[role='button']:has([data-icon='plus'])",
+        ]
+        
+        plus_clicked = False
+        for sel in plus_icon_selectors:
+            try:
+                loc = self.page.locator(sel).first
+                if loc.is_visible(timeout=2000):
+                    self.logger.info(f"[STEP] Found + icon: {sel}")
+                    loc.click()
+                    plus_clicked = True
+                    self.logger.info("[OK] Clicked + icon to add new status")
+                    human_delay(0.8)
+                    break
+            except Exception:
+                continue
+        
+        # If + icon not found/clicked, fall back to clicking "My status"
+        if not plus_clicked:
+            self.logger.info("[STEP] Clicking My status (no + icon found)")
+            safe_click(
+                self.page,
+                ADD_STATUS_SELECTORS,
+                timeout_ms=CONFIG.action_timeout_ms,
+                tries=CONFIG.max_action_retries,
+                log=self.logger.info,
+            )
+            human_delay(0.8)
 
     def upload_image(self, image_path: str) -> None:
         """Upload image. Click 'Photos & videos' if present, handling file chooser."""
@@ -195,49 +238,132 @@ class WhatsAppStatusUploader:
 
 
     def add_caption(self, caption: str) -> None:
-        """Add optional caption."""
+        """Add optional caption in the status preview screen."""
 
         if not caption.strip():
             self.logger.info("No caption provided; skipping caption step.")
             return
 
-
         self.logger.info("Adding caption...")
+        human_delay(1.0)
         
-        try:
-            # We look for something containing "Add a caption" or similar text.
-            loc = first_visible_locator(self.page, CAPTION_BOX, timeout_ms=CONFIG.action_timeout_ms)
-            
-            # Click to focus
-            loc.click()
-            human_delay(0.5)
-            
-            # Using keyboard input instead of .fill() is often safer for complex contenteditables
-            # as it mimics real typing and triggers JS events properly.
-            self.page.keyboard.type(caption, delay=50)
-            human_delay(1.5)  # Wait for typing to complete/register
-            self.logger.info("Caption typed.")
-            
-        except Exception as exc:
-            self.logger.warn(f"Failed to add caption: {exc}. Proceeding without caption.")
+        caption_added = False
+
+        # Method 1: Playwright get_by_placeholder (most reliable)
+        for placeholder_text in ["Add a caption", "Type a caption", "Caption"]:
+            try:
+                loc = self.page.get_by_placeholder(placeholder_text).first
+                if loc.is_visible(timeout=3000):
+                    self.logger.info(f"[STEP] Found caption via placeholder: '{placeholder_text}'")
+                    loc.click()
+                    human_delay(0.3)
+                    self.page.keyboard.type(caption, delay=30)
+                    human_delay(0.5)
+                    self.logger.info("Caption typed via placeholder.")
+                    caption_added = True
+                    break
+            except Exception:
+                continue
+
+        # Method 2: CSS selector fallbacks from CAPTION_BOX
+        if not caption_added:
+            for sel in CAPTION_BOX:
+                try:
+                    loc = self.page.locator(sel).first
+                    if loc.is_visible(timeout=2000):
+                        self.logger.info(f"[STEP] Found caption box: {sel}")
+                        loc.click()
+                        human_delay(0.3)
+                        self.page.keyboard.type(caption, delay=30)
+                        human_delay(0.5)
+                        self.logger.info("Caption typed via selector.")
+                        caption_added = True
+                        break
+                except Exception:
+                    continue
+
+        # Method 3: JavaScript-based detection — find the contenteditable
+        # that is inside the status image editor overlay (not the main chat)
+        if not caption_added:
+            self.logger.info("[STEP] Trying JS-based caption detection...")
+            try:
+                found = self.page.evaluate("""() => {
+                    // Find all contenteditable divs
+                    const editables = document.querySelectorAll('div[contenteditable="true"]');
+                    for (const el of editables) {
+                        const rect = el.getBoundingClientRect();
+                        // Caption field is at the bottom of the viewport, narrow height
+                        // and must be visible (not zero size)
+                        if (rect.width > 100 && rect.height > 10 && rect.height < 150
+                            && rect.bottom > window.innerHeight * 0.8) {
+                            el.click();
+                            el.focus();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""")
+                if found:
+                    human_delay(0.3)
+                    self.page.keyboard.type(caption, delay=30)
+                    human_delay(0.5)
+                    self.logger.info("Caption typed via JS detection.")
+                    caption_added = True
+            except Exception as exc:
+                self.logger.info(f"JS caption detection failed: {exc}")
+
+        if not caption_added:
+            self.logger.warn("Caption box not found; proceeding without caption.")
 
     def send_status(self) -> None:
         """Click Send/Post button (DOM-based, with updated selectors)."""
 
         self.logger.info("Posting status (clicking Send/Post)...")
-        # Step 1: Try to click using a DOM-attached Send button (icon-based first).
         clicked = False
-        try:
-            loc = first_attached_locator(self.page, SEND_BUTTON_SELECTORS, timeout_ms=CONFIG.action_timeout_ms)
-            loc.scroll_into_view_if_needed()
-            loc.click(timeout=CONFIG.action_timeout_ms)
-            clicked = True
-            self.logger.info("[STEP] Clicked Send button via DOM selector (attached element)")
-        except Exception as exc:  # noqa: BLE001
-            self.logger.info(f"[WARN] DOM send button via attached locator not found: {type(exc).__name__}: {exc}")
-
-        # Step 2: Fallback to legacy path if DOM path isn't available
+        
+        # Step 1: Try clicking each send button selector individually
+        for sel in SEND_BUTTON_SELECTORS:
+            try:
+                loc = self.page.locator(sel).first
+                if loc.is_visible(timeout=2000):
+                    self.logger.info(f"[STEP] Found send button: {sel}")
+                    loc.scroll_into_view_if_needed()
+                    human_delay(0.3)
+                    loc.click(timeout=CONFIG.action_timeout_ms)
+                    clicked = True
+                    self.logger.info(f"[OK] Clicked send button: {sel}")
+                    break
+            except Exception:
+                continue
+        
+        # Step 2: Try clicking parent element of send icon
         if not clicked:
+            try:
+                # Find the send icon and click its parent
+                send_icon = self.page.locator('[data-icon="send"]').first
+                if send_icon.is_visible(timeout=3000):
+                    # Click the parent button/div
+                    parent = send_icon.locator('xpath=..')
+                    parent.click(timeout=CONFIG.action_timeout_ms)
+                    clicked = True
+                    self.logger.info("[OK] Clicked parent of send icon")
+            except Exception as exc:
+                self.logger.info(f"[WARN] Parent click failed: {exc}")
+        
+        # Step 3: Fallback - use Enter key to send (most reliable)
+        if not clicked:
+            self.logger.info("[STEP] Using Enter key to send status...")
+            try:
+                human_delay(0.5)
+                self.page.keyboard.press("Enter")
+                clicked = True
+                self.logger.info("[OK] Pressed Enter to send")
+            except Exception as exc:
+                self.logger.info(f"[WARN] Enter key failed: {exc}")
+        
+        # Step 4: Last resort - safe_click with all selectors
+        if not clicked:
+            self.logger.info("[STEP] Trying safe_click fallback...")
             safe_click(
                 self.page,
                 SEND_BUTTON,
@@ -246,17 +372,9 @@ class WhatsAppStatusUploader:
                 log=self.logger.info,
             )
 
-        # Step 3: Post-click verification: allow transition and verify progress
-        human_delay(0.5)
-        try:
-            # Prefer DOM-based selectors for detachment check as well
-            for sel in SEND_BUTTON_SELECTORS:
-                loc = self.page.locator(sel).first
-                loc.wait_for(state="detached", timeout=CONFIG.navigation_timeout_ms)
-                self.logger.info("[VERIFY] Send button detached after click; post may be submitted.")
-                break
-        except Exception:
-            self.logger.info("[VERIFY] Send button detachment not detected; relying on post verification.")
+        # Post-click: wait for transition
+        human_delay(1.0)
+        self.logger.info("[STEP] Status send initiated, waiting for completion...")
 
     def verify_posted(self) -> None:
         """Best-effort verification.
@@ -266,26 +384,63 @@ class WhatsAppStatusUploader:
         """
 
         self.logger.info("Verifying status post success...")
+        human_delay(2.0)  # Give WhatsApp time to process
+        
+        # Check if send button is gone (indicates success)
         try:
-            # Wait until any known Send/Post button becomes hidden/detached.
-            # This indicates WhatsApp accepted the post and closed/transitioned composer.
-            for sel in SEND_BUTTON:
-                loc = self.page.locator(sel).first
-                try:
-                    # If it exists and is visible, wait for it to be hidden.
-                    if loc.is_visible():
-                        loc.wait_for(state="hidden", timeout=CONFIG.navigation_timeout_ms)
-                        self.logger.info("Post verification: send button disappeared.")
-                        return
-                except Exception:
-                    # Try next selector fallback.
-                    continue
-
-            # If no send button was visible by the time we check, treat as success.
-            self.logger.info("Post verification: send button not visible; assuming posted.")
+            send_icon = self.page.locator('[data-icon="send"]').first
+            if not send_icon.is_visible(timeout=3000):
+                self.logger.info("Post verification: send button not visible; status posted successfully.")
         except Exception:
-            # Defensive: even if verification is flaky, don't fail hard.
-            self.logger.warn("Post verification was inconclusive; treating as success.")
+            pass
+        
+        self.logger.info("Post verification complete.")
+        
+        # Dismiss any post-send dialogs (e.g. "Select chats" share dialog)
+        self._dismiss_post_send_dialogs()
+
+    def _dismiss_post_send_dialogs(self) -> None:
+        """Dismiss any dialogs that appear after posting status.
+        
+        WhatsApp often shows a 'Select chats' dialog after posting a status,
+        asking if you want to share to specific chats. We need to dismiss it.
+        """
+        human_delay(1.0)
+        
+        # Method 1: Press Escape to dismiss any overlay/dialog
+        try:
+            self.page.keyboard.press("Escape")
+            self.logger.info("[STEP] Pressed Escape to dismiss post-send dialog.")
+            human_delay(0.5)
+        except Exception:
+            pass
+
+        # Method 2: Click X button on "Select chats" dialog if still visible
+        close_selectors = [
+            "button[aria-label='Close']",
+            "button[aria-label='close']",
+            "[data-icon='x']",
+            "[data-icon='close']",
+            "span[data-icon='x']",
+            "span[data-icon='x-viewer']",
+        ]
+        for sel in close_selectors:
+            try:
+                loc = self.page.locator(sel).first
+                if loc.is_visible(timeout=1500):
+                    loc.click()
+                    self.logger.info(f"[OK] Dismissed dialog via: {sel}")
+                    human_delay(0.5)
+                    break
+            except Exception:
+                continue
+        
+        # Method 3: Press Escape again in case first one didn't work
+        try:
+            self.page.keyboard.press("Escape")
+            human_delay(0.5)
+        except Exception:
+            pass
 
     def close(self) -> None:
         """Close browser and Playwright."""
